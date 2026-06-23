@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>飲食店用会計システム</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 p-4">
+    <div id="app" class="max-w-md mx-auto space-y-4 pb-20"></div>
+
+    <script>
+        let state = {
+            taxRate: 10,
+            groups: [{ id: Date.now(), name: "1", baseMemo: "", addonMemo: "", discount: 0 }],
+            activeGroupId: null,
+            showKeypad: false,
+            activeInput: 'base',
+            cursorPos: 0,
+            dialog: null,
+            dialogInputValue: ''
+        };
+        state.activeGroupId = state.groups[0].id;
+
+        let tapCount = 0;
+        let lastTapTime = 0;
+
+        function getActiveGroup() {
+            return state.groups.find(g => g.id === state.activeGroupId);
+        }
+
+        function evalMath(str) {
+            try {
+                let sanitized = str.replace(/[^-()\d/*+.]/g, '');
+                return new Function('return ' + sanitized)();
+            } catch (e) {
+                return 0;
+            }
+        }
+
+        function evaluateMemo(memo) {
+            if (!memo) return 0;
+            let total = 0;
+            const lines = memo.split('\n');
+            for (let line of lines) {
+                let mathLine = line.replace(/×/g, '*').replace(/÷/g, '/').replace(/【/g, '(').replace(/】/g, ')');
+                let cleanLine = mathLine.replace(/[^0-9+\-*.\/()]/g, '').trim();
+                if (cleanLine) {
+                    let val = evalMath(cleanLine);
+                    if (!isNaN(val)) total += val;
+                }
+            }
+            return total;
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            const activeGroup = getActiveGroup();
+
+            app.innerHTML = `
+                <div class="flex space-x-2 overflow-x-auto py-2 pt-4">
+                    ${state.groups.map(g => `
+                        <button onclick="handleGroupClick(${g.id})" class="px-4 py-2 rounded-full whitespace-nowrap ${g.id === state.activeGroupId ? 'bg-blue-100 text-blue-800 border border-blue-300' : 'bg-white border text-gray-600'}">
+                            ${g.name}番
+                        </button>
+                    `).join('')}
+                    <button onclick="openAddDialog()" class="px-4 py-2 bg-white border rounded shadow text-blue-600">＋</button>
+                </div>
+
+                <div class="bg-white p-4 rounded shadow space-y-4">
+                    <div>
+                        <div class="flex justify-between items-end mb-1">
+                            <div class="font-bold text-sm text-gray-700">基本料金 (税抜)</div>
+                            <div id="baseSumDisplay" class="text-sm font-bold text-blue-600">小計: ¥0</div>
+                        </div>
+                        <textarea id="baseMemoInput" inputmode="none" class="w-full h-20 border rounded p-2 text-lg font-bold ${state.activeInput === 'base' && state.showKeypad ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-50'}" placeholder="基本料金を入力..." onfocus="handleFocus('base')" oninput="handleInput('base', this)" onkeyup="updateCursor(this)" onclick="updateCursor(this)">${activeGroup.baseMemo}</textarea>
+                    </div>
+
+                    <div>
+                        <div class="flex justify-between items-end mb-1">
+                            <div class="font-bold text-sm text-gray-700">追加料金 (税抜)</div>
+                            <div id="addonSumDisplay" class="text-sm font-bold text-red-500">小計: ¥0</div>
+                        </div>
+                        <textarea id="addonMemoInput" inputmode="none" class="w-full h-20 border rounded p-2 text-lg font-bold ${state.activeInput === 'addon' && state.showKeypad ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-50'}" placeholder="追加料金を入力..." onfocus="handleFocus('addon')" oninput="handleInput('addon', this)" onkeyup="updateCursor(this)" onclick="updateCursor(this)">${activeGroup.addonMemo}</textarea>
+                    </div>
+                    
+                    ${state.showKeypad ? renderKeypad() : ''}
+
+                    <div class="mt-4 bg-slate-900 rounded p-4 flex justify-between items-center">
+                        <div class="text-gray-300 font-bold">税抜合計</div>
+                        <div id="sumPreTaxDisplay" class="text-white text-xl font-black">¥0</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800 p-4 rounded shadow text-white">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="font-bold text-lg">会計計算結果</div>
+                        <button onclick="openTaxDialog()" class="text-xs bg-slate-700 px-3 py-1 rounded text-gray-300 border border-slate-600">税率: <span id="taxRateDisplay">${state.taxRate}</span>%</button>
+                    </div>
+                    <hr class="border-gray-500 mb-4">
+
+                    <div class="bg-slate-700 rounded p-3 flex justify-between items-center mb-4">
+                        <div class="font-bold">割引 (円)</div>
+                        <input id="discountInput" type="number" value="${activeGroup.discount || ''}" oninput="updateDiscount(this.value)" class="w-24 bg-slate-900 text-yellow-300 border-none rounded p-1 text-right font-bold">
+                    </div>
+
+                    <div class="bg-slate-900 rounded-2xl p-4">
+                        <div class="flex justify-between text-gray-400 mb-1">
+                            <span>税込合計 (割引前)</span>
+                            <span id="taxIncludedTotalDisplay">¥0.00</span>
+                        </div>
+                        <div class="flex justify-between text-red-400 mb-4">
+                            <span>割引適用</span>
+                            <span id="discountAmountDisplay">-¥0</span>
+                        </div>
+
+                        <div class="text-right mb-4">
+                            <div class="text-blue-400 text-xs font-bold">最終支払額</div>
+                            <div id="finalPaymentDisplay" class="text-3xl font-black">¥0</div>
+                        </div>
+
+                        <hr class="border-gray-700 mb-3">
+
+                        <div class="flex space-x-2">
+                            <div class="flex-1 bg-slate-800 rounded p-2">
+                                <div class="text-gray-400 text-[10px]">実質税抜価格</div>
+                                <div id="realBasePriceDisplay" class="font-bold">¥0.00</div>
+                            </div>
+                            <div class="flex-1 bg-slate-800 rounded p-2">
+                                <div class="text-gray-400 text-[10px]">実質消費税額</div>
+                                <div id="realTaxAmountDisplay" class="font-bold">¥0.00</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                ${state.dialog ? `
+                <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                    <div class="bg-white rounded-lg p-6 w-full max-w-sm text-black">
+                        <div class="font-bold text-lg mb-4">${state.dialog === 'add' ? '新しいグループの追加' : state.dialog === 'rename' ? '番号・名前の変更' : '共通税率の設定 (%)'}</div>
+                        <input type="${state.dialog === 'tax' ? 'number' : 'text'}" id="dialogInput" value="${state.dialogInputValue}" class="w-full border rounded p-2 mb-4" placeholder="${state.dialog === 'add' ? 'グループ番号を入力' : state.dialog === 'rename' ? '新しい名前・番号' : '税率を入力'}">
+                        <div class="flex justify-end space-x-2">
+                            <button onclick="closeDialog()" class="px-4 py-2 text-gray-500">キャンセル</button>
+                            <button onclick="submitDialog()" class="px-4 py-2 text-blue-600 font-bold">${state.dialog === 'add' ? '追加' : state.dialog === 'rename' ? '変更' : '設定'}</button>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+            `;
+
+            updateCalculations();
+
+            if(state.showKeypad) {
+                const ta = document.getElementById(state.activeInput + 'MemoInput');
+                if(ta) {
+                    ta.focus();
+                    ta.setSelectionRange(state.cursorPos, state.cursorPos);
+                }
+            }
+        }
+
+        function updateCalculations() {
+            const activeGroup = getActiveGroup();
+            const baseSum = evaluateMemo(activeGroup.baseMemo);
+            const addonSum = evaluateMemo(activeGroup.addonMemo);
+            const sumPreTax = baseSum + addonSum;
+            const taxRateDec = state.taxRate / 100.0;
+            const taxIncludedTotal = sumPreTax * (1 + taxRateDec);
+            const finalPayment = Math.max(0, taxIncludedTotal - activeGroup.discount);
+            const realBasePrice = finalPayment / (1 + taxRateDec);
+            const realTaxAmount = finalPayment - realBasePrice;
+
+            const el = (id) => document.getElementById(id);
+            if(el('baseSumDisplay')) el('baseSumDisplay').innerText = `小計: ¥${Math.floor(baseSum)}`;
+            if(el('addonSumDisplay')) el('addonSumDisplay').innerText = `小計: ¥${Math.floor(addonSum)}`;
+            if(el('sumPreTaxDisplay')) el('sumPreTaxDisplay').innerText = `¥${Math.floor(sumPreTax)}`;
+            if(el('taxRateDisplay')) el('taxRateDisplay').innerText = state.taxRate;
+            if(el('taxIncludedTotalDisplay')) el('taxIncludedTotalDisplay').innerText = `¥${taxIncludedTotal.toFixed(2)}`;
+            if(el('discountAmountDisplay')) el('discountAmountDisplay').innerText = `-¥${activeGroup.discount}`;
+            if(el('finalPaymentDisplay')) el('finalPaymentDisplay').innerText = `¥${Math.round(finalPayment)}`;
+            if(el('realBasePriceDisplay')) el('realBasePriceDisplay').innerText = `¥${realBasePrice.toFixed(2)}`;
+            if(el('realTaxAmountDisplay')) el('realTaxAmountDisplay').innerText = `¥${realTaxAmount.toFixed(2)}`;
+        }
+
+        function renderKeypad() {
+            const keys = [
+                ['【', '】', 'C'],
+                ['7', '8', '9', '÷'],
+                ['4', '5', '6', '×'],
+                ['1', '2', '3', '-'],
+                ['0', '00', '⌫', '+']
+            ];
+
+            let html = `
+                <div class="mt-4 space-y-2">
+                    <div class="flex space-x-2">
+                        <button onmousedown="event.preventDefault(); moveCursor(-1)" class="flex-1 bg-slate-200 text-black py-3 rounded font-bold">◀</button>
+                        <button onmousedown="event.preventDefault(); moveCursor(1)" class="flex-1 bg-slate-200 text-black py-3 rounded font-bold">▶</button>
+                        <button onmousedown="event.preventDefault(); closeKeypad()" class="flex-[1.5] bg-gray-700 text-white py-3 rounded font-bold text-sm">閉じる</button>
+                    </div>
+            `;
+
+            for (let row of keys) {
+                html += '<div class="flex space-x-2">';
+                for (let key of row) {
+                    let bg = "bg-slate-100";
+                    let text = "text-black";
+                    let flexClass = "flex-1";
+
+                    if (['÷', '×', '-', '+'].includes(key)) { bg = "bg-blue-100"; text = "text-blue-600"; }
+                    if (key === 'C') { bg = "bg-red-100"; text = "text-red-600"; }
+                    if (key === '⌫') { bg = "bg-red-50"; text = "text-red-500"; }
+                    
+                    if (['【', '】'].includes(key)) flexClass = "flex-[1.5]";
+                    
+                    html += `<button onmousedown="event.preventDefault(); handleKey('${key}')" class="${flexClass} ${bg} ${text} py-3 sm:py-4 rounded font-bold text-lg">${key}</button>`;
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        function handleInput(type, el) {
+            const group = getActiveGroup();
+            if (type === 'base') group.baseMemo = el.value;
+            else group.addonMemo = el.value;
+            
+            state.cursorPos = el.selectionStart;
+            updateCalculations();
+        }
+
+        function updateCursor(el) {
+            state.cursorPos = el.selectionStart;
+        }
+
+        function handleFocus(type) {
+            const ta = document.getElementById(type + 'MemoInput');
+            if (ta) state.cursorPos = ta.selectionStart;
+
+            if (state.activeInput !== type || !state.showKeypad) {
+                state.activeInput = type;
+                state.showKeypad = true;
+                render();
+            }
+        }
+
+        function openTaxDialog() {
+            state.dialog = 'tax';
+            state.dialogInputValue = state.taxRate;
+            render();
+            setTimeout(() => document.getElementById('dialogInput').focus(), 100);
+        }
+
+        function updateDiscount(val) {
+            const group = getActiveGroup();
+            group.discount = Number(val) || 0;
+            updateCalculations();
+        }
+
+        function closeKeypad() {
+            state.showKeypad = false;
+            render();
+        }
+
+        function handleKey(key) {
+            const group = getActiveGroup();
+            const ta = document.getElementById(state.activeInput + 'MemoInput');
+            let text = ta.value;
+            let pos = state.cursorPos;
+
+            if (key === 'C') {
+                text = "";
+                pos = 0;
+            } else if (key === '⌫' || key === '←') {
+                if (pos > 0) {
+                    text = text.slice(0, pos - 1) + text.slice(pos);
+                    pos = pos - 1;
+                }
+            } else {
+                text = text.slice(0, pos) + key + text.slice(pos);
+                pos = pos + key.length;
+            }
+
+            if (state.activeInput === 'base') {
+                group.baseMemo = text;
+            } else {
+                group.addonMemo = text;
+            }
+            state.cursorPos = pos;
+
+            ta.value = text;
+            ta.focus();
+            ta.setSelectionRange(pos, pos);
+
+            updateCalculations();
+        }
+
+        function moveCursor(dir) {
+            const ta = document.getElementById(state.activeInput + 'MemoInput');
+            if (!ta) return;
+            let text = ta.value;
+            let newPos = ta.selectionStart + dir;
+            
+            if (newPos >= 0 && newPos <= text.length) {
+                state.cursorPos = newPos;
+                ta.focus();
+                ta.setSelectionRange(newPos, newPos);
+            }
+        }
+
+        function handleGroupClick(id) {
+            const now = Date.now();
+            if (now - lastTapTime < 400) {
+                tapCount++;
+            } else {
+                tapCount = 1;
+            }
+            lastTapTime = now;
+
+            if (tapCount >= 3) {
+                openRenameDialog(id);
+                tapCount = 0;
+            } else {
+                state.activeGroupId = id;
+                state.showKeypad = false;
+                render();
+            }
+        }
+
+        function openAddDialog() {
+            state.dialog = 'add';
+            state.dialogInputValue = '';
+            render();
+            setTimeout(() => document.getElementById('dialogInput').focus(), 100);
+        }
+
+        function openRenameDialog(id) {
+            state.activeGroupId = id;
+            const group = getActiveGroup();
+            state.dialog = 'rename';
+            state.dialogInputValue = group.name;
+            render();
+            setTimeout(() => document.getElementById('dialogInput').focus(), 100);
+        }
+
+        function closeDialog() {
+            state.dialog = null;
+            render();
+        }
+
+        function submitDialog() {
+            const val = document.getElementById('dialogInput').value.trim();
+            if (val !== "") {
+                if (state.dialog === 'add') {
+                    const newId = Date.now();
+                    state.groups.push({ id: newId, name: val, baseMemo: "", addonMemo: "", discount: 0 });
+                    state.activeGroupId = newId;
+                } else if (state.dialog === 'rename') {
+                    const group = getActiveGroup();
+                    group.name = val;
+                } else if (state.dialog === 'tax') {
+                    state.taxRate = Number(val) || 0;
+                }
+            }
+            state.dialog = null;
+            render();
+        }
+
+        render();
+    </script>
+</body>
+</html>
