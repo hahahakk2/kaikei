@@ -5,8 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>飲食店用会計システム</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* テキストの選択や長押し時のシステムメニュー表示を無効化 */
+        .select-none {
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+    </style>
 </head>
-<body class="bg-slate-100 text-slate-800 p-4">
+<body class="bg-slate-100 text-slate-800 p-4 select-none">
     <div id="app" class="max-w-md mx-auto space-y-4 pb-20"></div>
 
     <script>
@@ -22,8 +32,17 @@
         };
         state.activeGroupId = state.groups[0].id;
 
-        let tapCount = 0;
-        let lastTapTime = 0;
+        // ジェスチャー管理用の状態
+        let gesture = {
+            id: null,
+            startX: 0,
+            startY: 0,
+            currentY: 0,
+            isPressing: false,
+            isHold: false,
+            timer: null,
+            element: null
+        };
 
         function getActiveGroup() {
             return state.groups.find(g => g.id === state.activeGroupId);
@@ -58,13 +77,23 @@
             const activeGroup = getActiveGroup();
 
             app.innerHTML = `
-                <div class="flex space-x-2 overflow-x-auto py-2 pt-4">
-                    ${state.groups.map(g => `
-                        <button onclick="handleGroupClick(${g.id})" class="px-4 py-2 rounded-full whitespace-nowrap ${g.id === state.activeGroupId ? 'bg-blue-100 text-blue-800 border border-blue-300' : 'bg-white border text-gray-600'}">
-                            ${g.name}番
-                        </button>
-                    `).join('')}
-                    <button onclick="openAddDialog()" class="px-4 py-2 bg-white border rounded shadow text-blue-600">＋</button>
+                <!-- 横スクロールコンテナ。ドラッグ中ははみ出し表示を許可するためstyleで動的にoverflowを制御します -->
+                <div id="group-tabs-container" class="flex space-x-2 overflow-x-auto py-2 pt-4 relative">
+                    ${state.groups.map(g => {
+                        const isActive = g.id === state.activeGroupId;
+                        return `
+                            <button 
+                                id="group-btn-${g.id}"
+                                onmousedown="startTouch(event, ${g.id})"
+                                ontouchstart="startTouch(event, ${g.id})"
+                                class="px-4 py-2 rounded-full whitespace-nowrap select-none relative transition-transform duration-75 border ${isActive ? 'bg-blue-100 text-blue-800 border-blue-300 font-bold' : 'bg-white border text-gray-600'}"
+                                style="touch-action: none;"
+                            >
+                                ${g.name}番
+                            </button>
+                        `;
+                    }).join('')}
+                    <button onclick="openAddDialog()" class="px-4 py-2 bg-white border rounded shadow text-blue-600 font-bold">＋</button>
                 </div>
 
                 <div class="bg-white p-4 rounded shadow space-y-4">
@@ -138,7 +167,14 @@
                 <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
                     <div class="bg-white rounded-lg p-6 w-full max-w-sm text-black">
                         <div class="font-bold text-lg mb-4">${state.dialog === 'add' ? '新しいグループの追加' : state.dialog === 'rename' ? '番号・名前の変更' : '共通税率の設定 (%)'}</div>
-                        <input type="${state.dialog === 'tax' ? 'number' : 'text'}" id="dialogInput" value="${state.dialogInputValue}" class="w-full border rounded p-2 mb-4" placeholder="${state.dialog === 'add' ? 'グループ番号を入力' : state.dialog === 'rename' ? '新しい名前・番号' : '税率を入力'}">
+                        <input 
+                            type="${state.dialog === 'tax' ? 'number' : 'text'}" 
+                            id="dialogInput" 
+                            value="${state.dialogInputValue}" 
+                            class="w-full border rounded p-2 mb-4" 
+                            placeholder="${state.dialog === 'add' ? 'グループ番号を入力' : state.dialog === 'rename' ? '新しい名前・番号' : '税率を入力'}"
+                            ${state.dialog === 'add' ? 'inputmode="numeric" pattern="[0-9]*"' : ''} 
+                        >
                         <div class="flex justify-end space-x-2">
                             <button onclick="closeDialog()" class="px-4 py-2 text-gray-500">キャンセル</button>
                             <button onclick="submitDialog()" class="px-4 py-2 text-blue-600 font-bold">${state.dialog === 'add' ? '追加' : state.dialog === 'rename' ? '変更' : '設定'}</button>
@@ -159,8 +195,183 @@
             }
         }
 
+        // 一時的なトースト通知表示 (ブラウザ標準のalertを避けるため)
+        function showNotification(message) {
+            let toast = document.getElementById('toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toast';
+                toast.className = 'fixed top-4 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded shadow-lg z-50 transition-opacity duration-300 opacity-0 pointer-events-none text-sm font-bold';
+                document.body.appendChild(toast);
+            }
+            toast.innerText = message;
+            toast.classList.remove('opacity-0');
+            toast.classList.add('opacity-100');
+            setTimeout(() => {
+                toast.classList.remove('opacity-100');
+                toast.classList.add('opacity-0');
+            }, 2000);
+        }
+
+        /* ------------------ ジェスチャー（長押し＋スライド操作）の処理 ------------------ */
+        function startTouch(e, id) {
+            const touch = e.touches ? e.touches[0] : e;
+            gesture.id = id;
+            gesture.startX = touch.clientX;
+            gesture.startY = touch.clientY;
+            gesture.currentY = touch.clientY;
+            gesture.isPressing = true;
+            gesture.isHold = false;
+            gesture.element = document.getElementById(`group-btn-${id}`);
+
+            // windowに対してリスナーを割り当てて指がボタンから外れても追従させる
+            window.addEventListener('mousemove', moveTouch, { passive: false });
+            window.addEventListener('mouseup', endTouch);
+            window.addEventListener('touchmove', moveTouch, { passive: false });
+            window.addEventListener('touchend', endTouch);
+            window.addEventListener('touchcancel', endTouch);
+
+            // 250ms長押ししたらホールド状態へ移行 (判定時間を短縮)
+            gesture.timer = setTimeout(() => {
+                if (gesture.isPressing) {
+                    gesture.isHold = true;
+                    if (gesture.element) {
+                        // ドラッグ中は親コンテナのoverflow制限を一時解除し上下に飛び出せるようにする
+                        const container = document.getElementById('group-tabs-container');
+                        if (container) {
+                            container.style.overflow = 'visible';
+                        }
+                        
+                        gesture.element.classList.add('scale-105', 'shadow-lg', 'z-50');
+                        if (navigator.vibrate) navigator.vibrate(50); // ブルッと震わせる
+                    }
+                }
+            }, 250);
+        }
+
+        function moveTouch(e) {
+            if (!gesture.isPressing) return;
+            const touch = e.touches ? e.touches[0] : e;
+            gesture.currentY = touch.clientY;
+            const deltaY = gesture.currentY - gesture.startY;
+            const deltaX = touch.clientX - gesture.startX;
+
+            // 長押し判定前に一定以上の動きがあった場合は長押しを解除する
+            if (!gesture.isHold && (Math.abs(deltaY) > 10 || Math.abs(deltaX) > 10)) {
+                clearTimeout(gesture.timer);
+            }
+
+            if (gesture.isHold) {
+                if (e.cancelable) e.preventDefault(); // スクロール等のブラウザ挙動を抑止
+                
+                gesture.element.style.transform = `translateY(${deltaY}px)`;
+                
+                // ボタンサイズ1個分の高さ（offsetHeightまたはデフォルト40px）を基準にする
+                const btnHeight = gesture.element.offsetHeight || 40;
+
+                // 上にボタンサイズ1個分スライド（削除モード）
+                if (deltaY < -btnHeight) {
+                    gesture.element.classList.add('bg-red-500', 'text-white', 'border-red-600');
+                    gesture.element.classList.remove('bg-blue-100', 'text-blue-800', 'border-blue-300', 'bg-white', 'text-gray-600', 'bg-green-500', 'border-green-600');
+                    gesture.element.innerText = '削除';
+                } 
+                // 下にボタンサイズ1個分スライド（名前変更モード）
+                else if (deltaY > btnHeight) {
+                    gesture.element.classList.add('bg-green-500', 'text-white', 'border-green-600');
+                    gesture.element.classList.remove('bg-blue-100', 'text-blue-800', 'border-blue-300', 'bg-white', 'text-gray-600', 'bg-red-500', 'border-red-600');
+                    gesture.element.innerText = '名前変更';
+                } 
+                // 基準に満たない場合は元の表示に戻す
+                else {
+                    gesture.element.classList.remove('bg-red-500', 'text-white', 'border-red-600', 'bg-green-500', 'border-green-600');
+                    const g = state.groups.find(x => x.id === gesture.id);
+                    gesture.element.innerText = `${g.name}番`;
+                    
+                    if (g.id === state.activeGroupId) {
+                        gesture.element.classList.add('bg-blue-100', 'text-blue-800', 'border-blue-300');
+                    } else {
+                        gesture.element.classList.add('bg-white', 'text-gray-600');
+                    }
+                }
+            }
+        }
+
+        function endTouch(e) {
+            if (!gesture.isPressing) return;
+            gesture.isPressing = false;
+            clearTimeout(gesture.timer);
+
+            window.removeEventListener('mousemove', moveTouch);
+            window.removeEventListener('mouseup', endTouch);
+            window.removeEventListener('touchmove', moveTouch);
+            window.removeEventListener('touchend', endTouch);
+            window.removeEventListener('touchcancel', endTouch);
+
+            const deltaY = gesture.currentY - gesture.startY;
+            const btnHeight = gesture.element ? (gesture.element.offsetHeight || 40) : 40;
+
+            // 親コンテナのoverflowスタイルを元に戻す
+            const container = document.getElementById('group-tabs-container');
+            if (container) {
+                container.style.overflow = '';
+            }
+
+            if (gesture.isHold) {
+                // スタイルをリセット
+                gesture.element.style.transform = '';
+                gesture.element.classList.remove('scale-105', 'shadow-lg', 'z-50');
+
+                if (deltaY < -btnHeight) {
+                    // 削除実行
+                    deleteGroup(gesture.id);
+                } else if (deltaY > btnHeight) {
+                    // 名前変更実行
+                    openRenameDialog(gesture.id);
+                } else {
+                    // どちらでもない場合は元の状態に戻して描画
+                    render();
+                }
+            } else {
+                // 単なるタップの場合はグループ切り替え
+                const touchEndClientX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+                const deltaX = touchEndClientX - gesture.startX;
+                // 誤タップ防止：大きくドラッグしていない場合のみ反応
+                if (Math.abs(deltaY) < 10 && Math.abs(deltaX) < 10) {
+                    state.activeGroupId = gesture.id;
+                    state.showKeypad = false;
+                    render();
+                }
+            }
+
+            gesture.id = null;
+            gesture.element = null;
+        }
+
+        function deleteGroup(id) {
+            if (state.groups.length <= 1) {
+                showNotification("最後の1グループは削除できません");
+                render();
+                return;
+            }
+
+            const index = state.groups.findIndex(g => g.id === id);
+            if (index !== -1) {
+                state.groups.splice(index, 1);
+                // 削除したグループがアクティブだった場合は、最初のグループを代わりにアクティブにする
+                if (state.activeGroupId === id) {
+                    state.activeGroupId = state.groups[0].id;
+                }
+                state.showKeypad = false;
+                render();
+                showNotification("グループを削除しました");
+            }
+        }
+        /* ---------------------------------------------------------------------------- */
+
         function updateCalculations() {
             const activeGroup = getActiveGroup();
+            if (!activeGroup) return;
+            
             const baseSum = evaluateMemo(activeGroup.baseMemo);
             const addonSum = evaluateMemo(activeGroup.addonMemo);
             const sumPreTax = baseSum + addonSum;
@@ -223,6 +434,7 @@
 
         function handleInput(type, el) {
             const group = getActiveGroup();
+            if (!group) return;
             if (type === 'base') group.baseMemo = el.value;
             else group.addonMemo = el.value;
             
@@ -254,6 +466,7 @@
 
         function updateDiscount(val) {
             const group = getActiveGroup();
+            if (!group) return;
             group.discount = Number(val) || 0;
             updateCalculations();
         }
@@ -265,6 +478,7 @@
 
         function handleKey(key) {
             const group = getActiveGroup();
+            if (!group) return;
             const ta = document.getElementById(state.activeInput + 'MemoInput');
             let text = ta.value;
             let pos = state.cursorPos;
@@ -309,25 +523,6 @@
             }
         }
 
-        function handleGroupClick(id) {
-            const now = Date.now();
-            if (now - lastTapTime < 400) {
-                tapCount++;
-            } else {
-                tapCount = 1;
-            }
-            lastTapTime = now;
-
-            if (tapCount >= 3) {
-                openRenameDialog(id);
-                tapCount = 0;
-            } else {
-                state.activeGroupId = id;
-                state.showKeypad = false;
-                render();
-            }
-        }
-
         function openAddDialog() {
             state.dialog = 'add';
             state.dialogInputValue = '';
@@ -358,7 +553,7 @@
                     state.activeGroupId = newId;
                 } else if (state.dialog === 'rename') {
                     const group = getActiveGroup();
-                    group.name = val;
+                    if (group) group.name = val;
                 } else if (state.dialog === 'tax') {
                     state.taxRate = Number(val) || 0;
                 }
